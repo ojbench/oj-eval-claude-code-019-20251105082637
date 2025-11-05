@@ -9,12 +9,78 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
   for (size_t i = 0; i < keys.size(); ++i) {
     auto current_query = rater.GetNextQuery();
 
-    // Simplest approach: just commit the query directly
-    // Run simulator first (might be required)
+    // Allocate result matrix
+    Matrix* result = matrix_memory_allocator.Allocate("result_" + std::to_string(i));
+
+    // Move query to SRAM for computation
+    gpu_sim.MoveMatrixToSharedMem(current_query);
+
+    // Initialize result as zeros with same shape as query
+    Matrix* zero_matrix = matrix_memory_allocator.Allocate("zero_matrix_" + std::to_string(i));
+    gpu_sim.Copy(current_query, zero_matrix, kInSharedMemory);
+    zero_matrix->Zero();
+    gpu_sim.Copy(zero_matrix, result, kInSharedMemory);
+
+    // For each key-value pair from 0 to i
+    for (size_t j = 0; j <= i; ++j) {
+      // Move key and value to SRAM
+      gpu_sim.MoveMatrixToSharedMem(keys[j]);
+      gpu_sim.MoveMatrixToSharedMem(values[j]);
+
+      // Compute Q * K^T for current key
+      // First transpose K to get K^T shape: [512, 1]
+      Matrix* k_transposed = matrix_memory_allocator.Allocate("k_transposed_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.Transpose(keys[j], kInSharedMemory);
+      gpu_sim.Copy(keys[j], k_transposed, kInSharedMemory);
+
+      Matrix* qk_result = matrix_memory_allocator.Allocate("qk_result_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.MatMul(current_query, k_transposed, qk_result);
+
+      // Compute exp(Q * K^T) for softmax
+      Matrix* exp_qk = matrix_memory_allocator.Allocate("exp_qk_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.MatExp(qk_result, exp_qk);
+
+      // Sum over rows for softmax denominator
+      Matrix* row_sum = matrix_memory_allocator.Allocate("row_sum_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.Sum(exp_qk, row_sum);
+
+      // Compute softmax: exp(QK^T) / sum(exp(QK^T))
+      Matrix* softmax_row = matrix_memory_allocator.Allocate("softmax_row_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.MatDiv(exp_qk, row_sum, softmax_row);
+
+      // Compute softmax * V for current key-value pair
+      Matrix* attention_row = matrix_memory_allocator.Allocate("attention_row_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.MatMul(softmax_row, values[j], attention_row);
+
+      // Add to running total
+      Matrix* new_result = matrix_memory_allocator.Allocate("new_result_" + std::to_string(i) + "_" + std::to_string(j));
+      gpu_sim.MatAdd(result, attention_row, new_result);
+
+      // Update result
+      gpu_sim.ReleaseMatrix(result);
+      result = new_result;
+
+      // Clean up intermediate matrices for this key-value pair
+      gpu_sim.ReleaseMatrix(k_transposed);
+      gpu_sim.ReleaseMatrix(qk_result);
+      gpu_sim.ReleaseMatrix(exp_qk);
+      gpu_sim.ReleaseMatrix(row_sum);
+      gpu_sim.ReleaseMatrix(softmax_row);
+      gpu_sim.ReleaseMatrix(attention_row);
+    }
+
+    // Move final result to HBM
+    gpu_sim.MoveMatrixToGpuHbm(result);
+
+    // Run simulator to execute all queued operations
     gpu_sim.Run(false, &matrix_memory_allocator);
 
-    // Commit the answer (query is already in HBM)
-    rater.CommitAnswer(*current_query);
+    // Commit the answer
+    rater.CommitAnswer(*result);
+
+    // Clean up remaining matrices
+    gpu_sim.ReleaseMatrix(zero_matrix);
+    gpu_sim.ReleaseMatrix(result);
 
     /*********************  End of your code *********************/
   
