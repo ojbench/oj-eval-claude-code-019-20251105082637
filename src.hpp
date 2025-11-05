@@ -9,18 +9,12 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
   for (size_t i = 0; i < keys.size(); ++i) {
     auto current_query = rater.GetNextQuery();
 
-    // Simple approach: just return the query as answer (for debugging)
-    Matrix* answer = matrix_memory_allocator.Allocate("answer_" + std::to_string(i));
-    gpu_sim.Copy(current_query, answer, kInGpuHbm);
-
-    // Run simulator to execute all queued operations
+    // Simplest approach: just commit the query directly
+    // Run simulator first (might be required)
     gpu_sim.Run(false, &matrix_memory_allocator);
 
-    // Commit the answer
-    rater.CommitAnswer(*answer);
-
-    // Clean up
-    gpu_sim.ReleaseMatrix(answer);
+    // Commit the answer (query is already in HBM)
+    rater.CommitAnswer(*current_query);
 
     /*********************  End of your code *********************/
   
